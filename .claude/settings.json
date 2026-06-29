@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "c:\\Users\\HP\\Creative printz website\\frontend\\src\\pages\\Customize"
+    ],
+    "allow": [
+      "Bash(curl -s http://localhost:5000/api/health)"
+    ]
+  }
+}
