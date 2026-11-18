@@ -115,15 +115,35 @@ exports.generateAiImage = async (req, res) => {
   const width = Math.min(Math.max(parseInt(req.body.width, 10) || 768, 256), 1024);
   const height = Math.min(Math.max(parseInt(req.body.height, 10) || 768, 256), 1024);
   const seed = Math.floor(Math.random() * 1e6);
-  const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=${width}&height=${height}&seed=${seed}&nologo=true`;
+  // enhance=false keeps the customer's words exactly as typed.
+  // With POLLINATIONS_API_KEY (from enter.pollinations.ai) the image comes from the keyed API:
+  // the chosen model (POLLINATIONS_IMAGE_MODEL, default flux), no logo, no shared wait.
+  // Without a key the old free endpoint is used: a smaller model, a logo, and about one
+  // picture every 45 s for the whole site.
+  const key = process.env.POLLINATIONS_API_KEY;
+  const model = process.env.POLLINATIONS_IMAGE_MODEL || 'flux';
+  const query = `width=${width}&height=${height}&seed=${seed}&enhance=false&nologo=true&safe=true`;
+  const url = key
+    ? `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=${encodeURIComponent(model)}&${query}`
+    : `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${query}`;
 
   try {
-    // Free tier allows ~1 image per 45s per server IP; set POLLINATIONS_API_KEY to remove the limit
-    const headers = process.env.POLLINATIONS_API_KEY ? { Authorization: `Bearer ${process.env.POLLINATIONS_API_KEY}` } : {};
+    const headers = key ? { Authorization: `Bearer ${key}` } : {};
     const response = await fetch(url, { headers, signal: AbortSignal.timeout(90000) });
     const contentType = response.headers.get('content-type') || '';
-    if (response.status === 402 || response.status === 429) {
-      return res.status(503).json({ success: false, message: 'AI image limit reached. Please wait about a minute and try again.' });
+    // 402/429 = "one image every 45 s" free limit, 503 = free service overloaded: both are temporary
+    if ([402, 429, 503].includes(response.status)) {
+      const body = await response.text().catch(() => '');
+      // the account has run out of credit: retrying won't help, so say so (and log it for the owner)
+      if (/INSUFFICIENT_BALANCE/.test(body)) {
+        console.error('Pollinations: out of balance for model', model, '- top up at https://enter.pollinations.ai');
+        return res.status(503).json({ success: false, message: 'AI images are paused right now. Please try again later or contact us.' });
+      }
+      let wait = parseInt(response.headers.get('retry-after'), 10);
+      if (!wait) wait = parseInt((body.match(/retry after (\d+)\s*s/i) || [])[1], 10);
+      // tell the studio how long to wait so it can retry by itself
+      const retryAfter = Math.min(Math.max(wait || 15, 5), 60);
+      return res.status(503).json({ success: false, retryAfter, message: `The AI is busy. Please try again in about ${retryAfter} seconds.` });
     }
     if (!response.ok || !contentType.startsWith('image/')) {
       return res.status(503).json({ success: false, message: 'AI image service is busy. Please try again in a moment.' });
