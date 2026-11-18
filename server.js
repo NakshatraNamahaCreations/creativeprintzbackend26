@@ -17,6 +17,9 @@ const orderRoutes = require('./src/routes/orders');
 const adminRoutes = require('./src/routes/admin');
 const designRoutes = require('./src/routes/designs');
 const templateRoutes = require('./src/routes/templates');
+const studioRoutes = require('./src/routes/studio');
+const enquiryRoutes = require('./src/routes/enquiries');
+const settingRoutes = require('./src/routes/settings');
 
 // Connect to DB
 connectDB();
@@ -28,7 +31,9 @@ const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
 // Middleware
-app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
+// CLIENT_URL may list several origins separated by commas (e.g. local dev ports + the live site)
+const allowedOrigins = (process.env.CLIENT_URL || '').split(',').map((o) => o.trim()).filter(Boolean);
+app.use(cors({ origin: allowedOrigins.length > 1 ? allowedOrigins : allowedOrigins[0], credentials: true }));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
@@ -43,6 +48,9 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/designs', designRoutes);
 app.use('/api/templates', templateRoutes);
+app.use('/api/studio', studioRoutes);
+app.use('/api/enquiries', enquiryRoutes);
+app.use('/api/settings', settingRoutes);
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ success: true, message: 'Creative Printz API running' }));

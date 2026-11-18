@@ -66,7 +66,11 @@ exports.getProducts = async (req, res) => {
 // @desc    Get single product
 exports.getProduct = async (req, res) => {
   try {
-    const product = await Product.findOne({ slug: req.params.slug, isActive: true })
+    // Accept either a slug or a MongoDB id (the design studio looks products up by id)
+    const mongoose = require('mongoose');
+    const key = req.params.slug;
+    const match = mongoose.Types.ObjectId.isValid(key) ? { $or: [{ _id: key }, { slug: key }] } : { slug: key };
+    const product = await Product.findOne({ ...match, isActive: true })
       .populate('category', 'name slug')
       .populate('templates', 'name thumbnail');
 

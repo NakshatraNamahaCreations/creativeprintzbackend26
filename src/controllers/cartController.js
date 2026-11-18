@@ -35,7 +35,10 @@ exports.addToCart = async (req, res) => {
         item.customDesign?.toString() === (customDesign || undefined)?.toString()
     );
 
-    if (existingItem) {
+    if (existingItem && customDesign) {
+      // Same design re-added after "Edit design": refresh that line instead of doubling it
+      Object.assign(existingItem, { price, selectedQuantity, previewImage, previewImageBack });
+    } else if (existingItem) {
       existingItem.quantity += quantity;
     } else {
       cart.items.push({ product: productId, quantity, price, selectedSize, selectedMaterial, selectedFinish, selectedQuantity, customDesign, previewImage, previewImageBack });
