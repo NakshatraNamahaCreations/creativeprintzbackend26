@@ -149,9 +149,10 @@ exports.generateAiImage = async (req, res) => {
   }
 
   // With a key: try models in order. The first two draw the words in the prompt as clean,
-  // readable lettering (posters, welcome boards, invitations); flux is the last resort.
-  // POLLINATIONS_IMAGE_MODEL (comma-separated) overrides the list.
-  const models = (process.env.POLLINATIONS_IMAGE_MODEL || 'microsoft/mai-image-2.7-flash,tongyi-mai/z-image-turbo,flux')
+  // readable lettering (posters, welcome boards, invitations); flux is next. The last two are free
+  // community models, used when the account has no credit left (simpler designs; people's names may
+  // come out as "NAME"). POLLINATIONS_IMAGE_MODEL (comma-separated) overrides the list.
+  const models = (process.env.POLLINATIONS_IMAGE_MODEL || 'microsoft/mai-image-2.7-flash,tongyi-mai/z-image-turbo,flux,community/scriptsnsenses-sys/lucid-origin:free,community/scriptsnsenses-sys/flux-2-dev-free')
     .split(',').map((m) => m.trim()).filter(Boolean);
   let blocked = false;
   let retryAfter = 0;
@@ -161,7 +162,7 @@ exports.generateAiImage = async (req, res) => {
       const response = await fetch('https://gen.pollinations.ai/v1/images/generations', {
         method: 'POST',
         headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, prompt: designPrompt, size: `${width}x${height}`, n: 1, response_format: 'b64_json' }),
+        body: JSON.stringify({ model, prompt: model.startsWith('community/') ? `${designPrompt} Flat graphic design artwork filling the whole frame edge to edge, front view, no mockup, no photo of a sign, no wall, no room.` : designPrompt, size: `${width}x${height}`, n: 1, response_format: 'b64_json' }),
         signal: AbortSignal.timeout(60000),
       });
       const body = await response.text().catch(() => '');
