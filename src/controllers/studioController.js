@@ -110,49 +110,90 @@ exports.sendForPrinting = async (req, res, next) => {
 // POST /api/studio/ai-image  { prompt, width, height }
 // Fetches the image on the server and returns it as a data URL so the canvas stays exportable.
 exports.generateAiImage = async (req, res) => {
-  const prompt = String(req.body.prompt || '').trim().slice(0, 400);
+  const prompt = String(req.body.prompt || '').trim().slice(0, 1200);
   if (!prompt) return res.status(400).json({ success: false, message: 'Describe the image you want' });
-  const width = Math.min(Math.max(parseInt(req.body.width, 10) || 768, 256), 1024);
-  const height = Math.min(Math.max(parseInt(req.body.height, 10) || 768, 256), 1024);
+  // Keep the page's shape: the short side at least 768 px (the text models need it), the long side at most 1536 px
+  let width = Math.max(parseInt(req.body.width, 10) || 1024, 64);
+  let height = Math.max(parseInt(req.body.height, 10) || 1024, 64);
+  let k = Math.max(768 / Math.min(width, height), 1);
+  k = Math.min(k * Math.max(width, height), 1536) / Math.max(width, height);
+  width = Math.round((width * k) / 16) * 16;
+  height = Math.round((height * k) / 16) * 16;
   const seed = Math.floor(Math.random() * 1e6);
   // enhance=false keeps the customer's words exactly as typed.
-  // With POLLINATIONS_API_KEY (from enter.pollinations.ai) the image comes from the keyed API:
-  // the chosen model (POLLINATIONS_IMAGE_MODEL, default flux), no logo, no shared wait.
-  // Without a key the old free endpoint is used: a smaller model, a logo, and about one
-  // picture every 45 s for the whole site.
-  const key = process.env.POLLINATIONS_API_KEY;
-  const model = process.env.POLLINATIONS_IMAGE_MODEL || 'flux';
   const query = `width=${width}&height=${height}&seed=${seed}&enhance=false&nologo=true&safe=true`;
-  const url = key
-    ? `https://gen.pollinations.ai/image/${encodeURIComponent(prompt)}?model=${encodeURIComponent(model)}&${query}`
-    : `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${query}`;
+  const key = process.env.POLLINATIONS_API_KEY;
+  // The text models follow this: print the customer's words exactly as typed
+  const designPrompt = /["“”]/.test(prompt)
+    ? `${prompt}. Print-ready design. Print the quoted words exactly as given and spelled correctly, without the quote marks.`
+    : `${prompt}. Print-ready design.`;
 
-  try {
-    const headers = key ? { Authorization: `Bearer ${key}` } : {};
-    const response = await fetch(url, { headers, signal: AbortSignal.timeout(90000) });
-    const contentType = response.headers.get('content-type') || '';
-    // 402/429 = "one image every 45 s" free limit, 503 = free service overloaded: both are temporary
-    if ([402, 429, 503].includes(response.status)) {
-      const body = await response.text().catch(() => '');
-      // the account has run out of credit: retrying won't help, so say so (and log it for the owner)
-      if (/INSUFFICIENT_BALANCE/.test(body)) {
-        console.error('Pollinations: out of balance for model', model, '- top up at https://enter.pollinations.ai');
-        return res.status(503).json({ success: false, message: 'AI images are paused right now. Please try again later or contact us.' });
+  // Without a key: the old free endpoint (smaller model, logo, about one picture every 45 s for the whole site).
+  if (!key) {
+    try {
+      const response = await fetch(`https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${query}`, { signal: AbortSignal.timeout(90000) });
+      const contentType = response.headers.get('content-type') || '';
+      if ([402, 429, 503].includes(response.status)) {
+        const body = await response.text().catch(() => '');
+        let wait = parseInt(response.headers.get('retry-after'), 10);
+        if (!wait) wait = parseInt((body.match(/retry after (\d+)\s*s/i) || [])[1], 10);
+        const retryAfter = Math.min(Math.max(wait || 15, 5), 60);
+        return res.status(503).json({ success: false, retryAfter, message: `The AI is busy. Please try again in about ${retryAfter} seconds.` });
       }
-      let wait = parseInt(response.headers.get('retry-after'), 10);
-      if (!wait) wait = parseInt((body.match(/retry after (\d+)\s*s/i) || [])[1], 10);
-      // tell the studio how long to wait so it can retry by itself
-      const retryAfter = Math.min(Math.max(wait || 15, 5), 60);
-      return res.status(503).json({ success: false, retryAfter, message: `The AI is busy. Please try again in about ${retryAfter} seconds.` });
-    }
-    if (!response.ok || !contentType.startsWith('image/')) {
+      if (!response.ok || !contentType.startsWith('image/')) throw new Error('bad response');
+      const buffer = Buffer.from(await response.arrayBuffer());
+      return res.json({ success: true, image: `data:${contentType.split(';')[0]};base64,${buffer.toString('base64')}` });
+    } catch {
       return res.status(503).json({ success: false, message: 'AI image service is busy. Please try again in a moment.' });
     }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    res.json({ success: true, image: `data:${contentType.split(';')[0]};base64,${buffer.toString('base64')}` });
-  } catch (error) {
-    res.status(503).json({ success: false, message: 'AI image service is busy. Please try again in a moment.' });
   }
+
+  // With a key: try models in order. The first two draw the words in the prompt as clean,
+  // readable lettering (posters, welcome boards, invitations); flux is the last resort.
+  // POLLINATIONS_IMAGE_MODEL (comma-separated) overrides the list.
+  const models = (process.env.POLLINATIONS_IMAGE_MODEL || 'microsoft/mai-image-2.7-flash,tongyi-mai/z-image-turbo,flux')
+    .split(',').map((m) => m.trim()).filter(Boolean);
+  let blocked = false;
+  let retryAfter = 0;
+  for (const model of models) {
+    try {
+      // POST (not the /image/{prompt} link): the link version blanks out people's names (they come back as {NAME})
+      const response = await fetch('https://gen.pollinations.ai/v1/images/generations', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, prompt: designPrompt, size: `${width}x${height}`, n: 1, response_format: 'b64_json' }),
+        signal: AbortSignal.timeout(90000),
+      });
+      const body = await response.text().catch(() => '');
+      if (response.ok) {
+        let item;
+        try { item = JSON.parse(body).data?.[0]; } catch { item = null; }
+        let b64 = item?.b64_json;
+        let type = 'image/png';
+        if (!b64 && item?.url) {
+          const img = await fetch(item.url, { signal: AbortSignal.timeout(60000) });
+          if (img.ok) { type = (img.headers.get('content-type') || type).split(';')[0]; b64 = Buffer.from(await img.arrayBuffer()).toString('base64'); }
+        }
+        if (b64) {
+          if (b64.startsWith('/9j/')) type = 'image/jpeg';
+          else if (b64.startsWith('UklGR')) type = 'image/webp';
+          return res.json({ success: true, model, image: `data:${type};base64,${b64}` });
+        }
+      }
+      if (/INSUFFICIENT_BALANCE/.test(body)) console.error('Pollinations: out of balance for model', model, '- top up at https://enter.pollinations.ai');
+      else console.error('Pollinations', model, response.status, body.slice(0, 160));
+      if (/moderation/i.test(body)) blocked = true;
+      if (response.status === 429) {
+        const wait = parseInt(response.headers.get('retry-after'), 10) || parseInt((body.match(/retry after (\d+)\s*s/i) || [])[1], 10);
+        retryAfter = Math.min(Math.max(wait || 15, 5), 60);
+      }
+    } catch (error) {
+      console.error('Pollinations', model, error.message);
+    }
+  }
+  if (retryAfter) return res.status(503).json({ success: false, retryAfter, message: `The AI is busy. Please try again in about ${retryAfter} seconds.` });
+  if (blocked) return res.status(422).json({ success: false, message: 'The AI could not make this picture. Please reword your description and try again.' });
+  res.status(503).json({ success: false, message: 'AI image service is busy. Please try again in a moment.' });
 };
 
 // GET /api/studio/admin/all  (admin)
