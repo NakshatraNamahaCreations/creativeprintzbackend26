@@ -162,7 +162,7 @@ exports.generateAiImage = async (req, res) => {
         method: 'POST',
         headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model, prompt: designPrompt, size: `${width}x${height}`, n: 1, response_format: 'b64_json' }),
-        signal: AbortSignal.timeout(90000),
+        signal: AbortSignal.timeout(60000),
       });
       const body = await response.text().catch(() => '');
       if (response.ok) {
@@ -194,6 +194,37 @@ exports.generateAiImage = async (req, res) => {
   if (retryAfter) return res.status(503).json({ success: false, retryAfter, message: `The AI is busy. Please try again in about ${retryAfter} seconds.` });
   if (blocked) return res.status(422).json({ success: false, message: 'The AI could not make this picture. Please reword your description and try again.' });
   res.status(503).json({ success: false, message: 'AI image service is busy. Please try again in a moment.' });
+};
+
+// AI picture jobs. The picture can take 15-60 s, longer than the Netlify proxy waits (about 26 s),
+// so the studio starts a job and asks every few seconds whether it is ready.
+const aiJobs = new Map();
+const AI_JOB_TTL = 10 * 60 * 1000;
+
+// POST /api/studio/ai-image/jobs  { prompt, width, height }  ->  { jobId }
+exports.startAiImageJob = (req, res) => {
+  const prompt = String(req.body.prompt || '').trim();
+  if (!prompt) return res.status(400).json({ success: false, message: 'Describe the image you want' });
+  const now = Date.now();
+  for (const [id, job] of aiJobs) if (now - job.t > AI_JOB_TTL) aiJobs.delete(id);
+  const id = require('crypto').randomBytes(12).toString('hex');
+  aiJobs.set(id, { done: false, t: now });
+  const finish = (code, body) => aiJobs.set(id, { done: true, code, body, t: Date.now() });
+  // run the normal handler with a stand-in response that stores the result
+  const jobRes = { code: 200, status(c) { this.code = c; return this; }, json(body) { finish(this.code, body); return this; } };
+  Promise.resolve(exports.generateAiImage({ body: { ...req.body } }, jobRes))
+    .catch(() => finish(503, { success: false, message: 'AI image service is busy. Please try again in a moment.' }));
+  res.json({ success: true, jobId: id });
+};
+
+// GET /api/studio/ai-image/jobs/:id  ->  { pending: true } until ready, then the picture (or the error)
+exports.getAiImageJob = (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const job = aiJobs.get(req.params.id);
+  if (!job) return res.status(404).json({ success: false, message: 'This request expired. Please press Generate again.' });
+  if (!job.done) return res.json({ success: true, pending: true });
+  aiJobs.delete(req.params.id);
+  res.status(job.code).json(job.body);
 };
 
 // GET /api/studio/admin/all  (admin)
